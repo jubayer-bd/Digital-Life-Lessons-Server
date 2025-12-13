@@ -146,7 +146,22 @@ async function run() {
     // ==========================================
 
     // Get All Public Lessons
-    
+    app.get("/lessons", async (req, res) => {
+      try {
+        const query = { visibility: "public" };
+        const lessons = await lessonsCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(lessons);
+      } catch (err) {
+        res.status(500).send({ message: "Error fetching lessons" });
+      }
+    });
+
+    // Get Single Lesson
+
+   
 
     // Ping check
     await client.db("admin").command({ ping: 1 });
