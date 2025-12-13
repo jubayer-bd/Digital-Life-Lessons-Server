@@ -30,7 +30,7 @@ const verifyFBToken = async (req, res, next) => {
     const idToken = token.split(" ")[1];
     const decoded = await admin.auth().verifyIdToken(idToken);
     req.decoded_email = decoded.email;
-    auth_email = req.decoded_email;
+    // auth_email = req.decoded_email;
     next();
   } catch (error) {
     return res.status(401).send({ message: "Unauthorized: Invalid token" });
@@ -180,7 +180,7 @@ async function run() {
     // Get User's Created Lessons
     app.get("/lessons/my-lessons", verifyFBToken, async (req, res) => {
       try {
-        const email = auth_email;
+        const email = req.decoded_email;
 
         const lessons = await lessonsCollection
           .find({ authorEmail: email })
@@ -194,7 +194,7 @@ async function run() {
     });
 
     // Get User's Saved (Favorited) Lessons
-    
+
     app.get("/lessons/saved", verifyFBToken, async (req, res) => {
       try {
         const email = req.decoded_email;
@@ -247,6 +247,95 @@ async function run() {
         res.status(404).send({ message: "Lesson not found" });
       }
     });
+
+    // Soft delete endpoint (Move to Trash)
+    app.patch("/lessons/:id/trash", verifyFBToken, async (req, res) => {
+      const { id } = req.params;
+      const email = req.decoded_email;
+
+      try {
+        const lesson = await lessonsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!lesson) {
+          return res.status(404).send({ message: "Lesson not found" });
+        }
+
+        // Only the author can trash their lesson
+        if (lesson.authorEmail !== email) {
+          return res.status(403).send({ message: "Forbidden access" });
+        }
+
+        // Perform the soft delete (update isDeleted flag)
+        const result = await lessonsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              isDeleted: true,
+              deletedAt: new Date(), 
+            },
+          }
+        );
+
+        res.send({
+          success: true,
+          modifiedCount: result.modifiedCount,
+        });
+      } catch (error) {
+        console.error("Error moving to trash:", error);
+        res.status(500).send({ message: "Internal server error" });
+      }
+    });
+    app.patch("/lessons/:id", verifyFBToken, async (req, res) => {
+      const { id } = req.params;
+      const email = req.decoded_email;
+
+      const lesson = await lessonsCollection.findOne({ _id: new ObjectId(id) });
+
+      if (!lesson) {
+        return res.status(404).send({ message: "Lesson not found" });
+      }
+
+      // Only author can edit
+      if (lesson.authorEmail !== email) {
+        return res.status(403).send({ message: "Forbidden access" });
+      }
+
+      const {
+        title,
+        description,
+        category,
+        emotionalTone,
+        image,
+        visibility,
+        accessLevel,
+      } = req.body;
+
+      const updateDoc = {
+        $set: {
+          title,
+          description,
+          category,
+          emotionalTone,
+          image,
+          visibility,
+          accessLevel,
+          updatedAt: new Date(),
+        },
+      };
+
+      const result = await lessonsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        updateDoc
+      );
+
+      res.send({
+        success: true,
+        modifiedCount: result.modifiedCount,
+      });
+    });
+
     // Like Functionality
     app.patch("/lessons/:id/like", verifyFBToken, async (req, res) => {
       const id = req.params.id;
@@ -273,7 +362,7 @@ async function run() {
     app.patch("/lessons/:id/favorite", verifyFBToken, async (req, res) => {
       try {
         const id = req.params.id;
-        const email = auth_email;
+        const email = req.decoded_email;
         const queryId = new ObjectId(id);
 
         const lesson = await lessonsCollection.findOne({ _id: queryId });
