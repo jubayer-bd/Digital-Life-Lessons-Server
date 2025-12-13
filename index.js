@@ -178,7 +178,21 @@ async function run() {
     });
 
     // Get User's Created Lessons
-   
+    app.get("/lessons/my-lessons", verifyFBToken, async (req, res) => {
+      try {
+        const email = auth_email;
+
+        const lessons = await lessonsCollection
+          .find({ authorEmail: email })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send(lessons);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch my lessons" });
+      }
+    });
+
 
     // Ping check
     await client.db("admin").command({ ping: 1 });
