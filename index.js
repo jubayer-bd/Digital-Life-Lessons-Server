@@ -114,7 +114,13 @@ async function run() {
     });
 
     // Check Premium Status
-   
+    app.get("/users/:email/isPremium", async (req, res) => {
+      const email = req.params.email;
+      const user = await userCollection.findOne({ email });
+      res.send({ isPremium: user?.isPremium === true });
+    });
+
+    
 
     // Ping check
     await client.db("admin").command({ ping: 1 });
