@@ -120,7 +120,13 @@ async function run() {
       res.send({ isPremium: user?.isPremium === true });
     });
 
-    
+    // Admin: Manage Users
+    app.get("/users", verifyFBToken, verifyAdmin, async (req, res) => {
+      const result = await userCollection.find().toArray();
+      res.send(result);
+    });
+
+   
 
     // Ping check
     await client.db("admin").command({ ping: 1 });
