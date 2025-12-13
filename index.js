@@ -193,6 +193,173 @@ async function run() {
       }
     });
 
+    // Get User's Saved (Favorited) Lessons
+    
+    app.get("/lessons/saved", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.decoded_email;
+        const query = { favorites: email };
+
+        // CHANGED variable name to 'result' to not conflict with collection 'savedLessons'
+        const result = await lessonsCollection.find(query).toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // Lesson Analytics (Daily creation count)
+    app.get("/lessons/analytics", verifyFBToken, async (req, res) => {
+      const email = req.decoded_email; // Corrected from req.user
+
+      const pipeline = [
+        { $match: { authorEmail: email } },
+        {
+          $group: {
+            _id: { $dayOfWeek: "$createdAt" }, // Returns 1 (Sun) to 7 (Sat)
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ];
+
+      const result = await lessonsCollection.aggregate(pipeline).toArray();
+
+      const labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+      const counts = Array(7).fill(0);
+
+      result.forEach((d) => {
+        // Mongo dayOfWeek is 1-based (1=Sun), Array is 0-based
+        if (d._id) counts[d._id - 1] = d.count;
+      });
+
+      res.send({ labels, counts });
+    });
+
+    app.get("/lessons/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const result = await lessonsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        res.send(result);
+      } catch (e) {
+        res.status(404).send({ message: "Lesson not found" });
+      }
+    });
+    // Like Functionality
+    app.patch("/lessons/:id/like", verifyFBToken, async (req, res) => {
+      const id = req.params.id;
+      const email = req.decoded_email;
+
+      const lesson = await lessonsCollection.findOne({ _id: new ObjectId(id) });
+      const isLiked = lesson?.likes?.includes(email);
+
+      let updateDoc;
+      if (isLiked) {
+        updateDoc = { $pull: { likes: email }, $inc: { likesCount: -1 } };
+      } else {
+        updateDoc = { $push: { likes: email }, $inc: { likesCount: 1 } };
+      }
+
+      const result = await lessonsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        updateDoc
+      );
+      res.send({ success: true, isLiked: !isLiked });
+    });
+
+    // Favorite Functionality
+    app.patch("/lessons/:id/favorite", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const email = auth_email;
+        const queryId = new ObjectId(id);
+
+        const lesson = await lessonsCollection.findOne({ _id: queryId });
+
+        if (!lesson) {
+          return res
+            .status(404)
+            .send({ success: false, message: "Lesson not found" });
+        }
+
+        const isFavorited = lesson?.favorites?.includes(email);
+        let updateDoc;
+
+        if (isFavorited) {
+          // REMOVE FAVORITE
+          updateDoc = {
+            $pull: { favorites: email },
+            $inc: { favoritesCount: lesson.favoritesCount > 0 ? -1 : 0 },
+          };
+          // Delete from the separate savedLessons collection
+          await savedLessons.deleteOne({ lessonId: queryId, userEmail: email });
+        } else {
+          // ADD FAVORITE
+          updateDoc = {
+            $addToSet: { favorites: email },
+            $inc: { favoritesCount: 1 },
+          };
+          // Upsert into savedLessons collection
+          await savedLessons.updateOne(
+            { lessonId: queryId, userEmail: email },
+            {
+              $set: {
+                lessonId: queryId,
+                userEmail: email,
+                title: lesson.title,
+                image: lesson.image,
+              },
+            },
+            { upsert: true }
+          );
+        }
+
+        await lessonsCollection.updateOne({ _id: queryId }, updateDoc);
+
+        res.send({
+          success: true,
+          isFavorited: !isFavorited,
+          message: isFavorited
+            ? "Removed from favorites"
+            : "Added to favorites",
+        });
+      } catch (error) {
+        console.error("Favorite error:", error);
+        res.status(500).send({ success: false, error: error.message });
+      }
+    });
+
+    // ==========================================
+    // COMMENTS
+    // ==========================================
+    app.get("/lessons/:id/comments", async (req, res) => {
+      const comments = await commentsCollection
+        .find({ lessonId: req.params.id })
+        .sort({ createdAt: -1 })
+        .toArray();
+      res.send(comments);
+    });
+
+    app.post("/lessons/:id/comments", verifyFBToken, async (req, res) => {
+      const { content } = req.body;
+      const email = req.decoded_email;
+      const user = await userCollection.findOne({ email });
+
+      const newComment = {
+        lessonId: req.params.id,
+        userId: user?._id,
+        userName: user?.displayName || "Anonymous",
+        userImg: user?.photoURL || null,
+        content,
+        createdAt: new Date(),
+      };
+      const result = await commentsCollection.insertOne(newComment);
+      res.send(result);
+    });
+
+   
 
     // Ping check
     await client.db("admin").command({ ping: 1 });
