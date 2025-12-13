@@ -359,7 +359,74 @@ async function run() {
       res.send(result);
     });
 
-   
+    // ==========================================
+    // PAYMENT (STRIPE)
+    // ==========================================
+    app.post("/payment-checkout-session", async (req, res) => {
+      const { email } = req.body;
+      const amount = 1500 * 100; // 1500 BDT in cents
+
+      try {
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ["card"],
+          mode: "payment",
+          customer_email: email,
+          line_items: [
+            {
+              price_data: {
+                currency: "bdt",
+                unit_amount: amount,
+                product_data: { name: "Premium Membership" },
+              },
+              quantity: 1,
+            },
+          ],
+          metadata: { userEmail: email, transactionType: "premium-upgrade" },
+          success_url: `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.FRONTEND_URL}/premium`,
+        });
+        res.send({ url: session.url });
+      } catch (e) {
+        res.status(500).send({ error: e.message });
+      }
+    });
+
+    app.patch("/payment-success", async (req, res) => {
+      const { session_id } = req.query;
+      if (!session_id)
+        return res.status(400).send({ message: "Session ID missing" });
+
+      try {
+        const session = await stripe.checkout.sessions.retrieve(session_id);
+        if (session.payment_status === "paid") {
+          const { userEmail, transactionType } = session.metadata;
+
+          if (transactionType === "premium-upgrade") {
+            await userCollection.updateOne(
+              { email: userEmail },
+              {
+                $set: {
+                  isPremium: true,
+                  transactionId: session.payment_intent,
+                },
+              }
+            );
+
+            await paymentCollection.insertOne({
+              email: userEmail,
+              amount: session.amount_total / 100,
+              transactionId: session.payment_intent,
+              date: new Date(),
+              type: "premium-upgrade",
+            });
+            return res.send({ success: true });
+          }
+        }
+        res.send({ success: false });
+      } catch (e) {
+        res.status(500).send({ message: "Error processing payment" });
+      }
+    });
 
     // Ping check
     await client.db("admin").command({ ping: 1 });
