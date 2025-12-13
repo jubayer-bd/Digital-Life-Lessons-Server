@@ -99,7 +99,22 @@ async function run() {
       res.send(result);
     });
 
+    app.get("/users/:email", async (req, res) => {
+      const email = req.params.email;
+      const user = await userCollection.findOne({ email });
+      if (!user) return res.status(404).json({ message: "User not found" });
+      res.json(user);
+    });
 
+    // Check Role
+    app.get("/users/:email/role", async (req, res) => {
+      const email = req.params.email;
+      const user = await userCollection.findOne({ email });
+      res.send({ role: user?.role || "user" });
+    });
+
+    // Check Premium Status
+   
 
     // Ping check
     await client.db("admin").command({ ping: 1 });
