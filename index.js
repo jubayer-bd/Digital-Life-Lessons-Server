@@ -161,6 +161,23 @@ async function run() {
 
     // Get Single Lesson
 
+    // Create Lesson
+    app.post("/lessons", verifyFBToken, async (req, res) => {
+      const lesson = req.body;
+
+      // Initialize counters and arrays
+      lesson.likes = [];
+      lesson.favorites = [];
+      lesson.likesCount = 0;
+      lesson.favoritesCount = 0;
+      lesson.authorEmail = req.decoded_email;
+      lesson.createdAt = new Date(); // Important: Store as Date object for sorting/analytics
+
+      const result = await lessonsCollection.insertOne(lesson);
+      res.send(result);
+    });
+
+    // Get User's Created Lessons
    
 
     // Ping check
