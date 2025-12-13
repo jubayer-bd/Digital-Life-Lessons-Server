@@ -126,7 +126,27 @@ async function run() {
       res.send(result);
     });
 
-   
+    app.patch(
+      "/users/:id/role",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
+        const { role } = req.body;
+        const result = await userCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { role: role } }
+        );
+        res.send(result);
+      }
+    );
+
+    // ==========================================
+    // LESSONS API
+    // ==========================================
+
+    // Get All Public Lessons
+    
 
     // Ping check
     await client.db("admin").command({ ping: 1 });
