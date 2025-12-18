@@ -102,17 +102,19 @@ async function run() {
 
     // user profile
     app.get("/users/profile-stats", verifyFBToken, async (req, res) => {
-      const email = req.decoded_email;
+      try {
+        const email = req.decoded_email;
 
-      const created = await lessonsCollection.countDocuments({
-        authorEmail: email,
-      });
+        // Run counts in parallel for performance
+        const [created, saved] = await Promise.all([
+          lessonsCollection.countDocuments({ authorEmail: email }),
+          lessonsCollection.countDocuments({ favorites: email }),
+        ]);
 
-      const saved = await lessonsCollection.countDocuments({
-        favorites: email,
-      });
-
-      res.send({ created, saved });
+        res.send({ created, saved });
+      } catch (error) {
+        res.status(500).send({ message: "Failed to fetch stats" });
+      }
     });
 
     // Check Role
@@ -183,8 +185,30 @@ async function run() {
 
     // Admin: Manage Users
     app.get("/users", verifyFBToken, verifyAdmin, async (req, res) => {
-      const result = await userCollection.find().toArray();
-      res.send(result);
+      const users = await userCollection
+        .aggregate([
+          {
+            $lookup: {
+              from: "lessons",
+              localField: "email",
+              foreignField: "authorEmail",
+              as: "lessons",
+            },
+          },
+          {
+            $addFields: {
+              totalLessons: { $size: "$lessons" },
+            },
+          },
+          {
+            $project: {
+              lessons: 0, // remove lesson array (optional)
+            },
+          },
+        ])
+        .toArray();
+
+      res.send(users);
     });
 
     app.patch(
@@ -227,43 +251,97 @@ async function run() {
 
     // admin
     app.get("/admin/stats", verifyFBToken, verifyAdmin, async (req, res) => {
-      const totalUsers = await userCollection.countDocuments();
-      const totalPublicLessons = await lessonsCollection.countDocuments({
-        visibility: "public",
-      });
-      const reportedLessons = await lessonsCollection.countDocuments({
-        isReported: true,
-      });
+      try {
+        // 1. Basic Counts
+        const totalUsers = await userCollection.countDocuments();
+        const totalPublicLessons = await lessonsCollection.countDocuments({
+          visibility: "public",
+        });
+        const reportedLessons = await lessonsCollection.countDocuments({
+          reportCount: { $gt: 0 },
+        });
 
-      const today = new Date().toISOString().slice(0, 10);
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        const todayLessons = await lessonsCollection.countDocuments({
+          createdAt: { $gte: todayStart },
+        });
 
-      const todayLessons = await lessonsCollection.countDocuments({
-        createdAt: { $gte: today },
-      });
-
-      const topContributors = await lessonsCollection
-        .aggregate([
-          {
-            $group: {
-              _id: "$authorEmail",
-              lessonCount: { $sum: 1 },
-              name: { $first: "$authorName" },
+        // 2. Top Contributors Aggregation
+        const topContributors = await lessonsCollection
+          .aggregate([
+            {
+              $group: {
+                _id: "$authorEmail",
+                lessonCount: { $sum: 1 },
+                name: { $first: "$authorName" },
+                email: { $first: "$authorEmail" },
+                image: { $first: "$authorImage" }, // Added image to match frontend
+              },
             },
-          },
-          { $sort: { lessonCount: -1 } },
-          { $limit: 5 },
-        ])
-        .toArray();
+            { $sort: { lessonCount: -1 } },
+            { $limit: 5 },
+          ])
+          .toArray();
 
-      res.send({
-        totalUsers,
-        totalPublicLessons,
-        reportedLessons,
-        todayLessons,
-        topContributors,
-        lessonGrowth: [], // optional (daily aggregation)
-        userGrowth: [],
-      });
+        // 3. Lesson Growth (Last 7 Days)
+        const lessonGrowth = await lessonsCollection
+          .aggregate([
+            {
+              $match: {
+                createdAt: {
+                  $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+                },
+              },
+            },
+            {
+              $group: {
+                _id: {
+                  $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+                },
+                count: { $sum: 1 },
+              },
+            },
+            { $sort: { _id: 1 } },
+            { $project: { date: "$_id", count: 1, _id: 0 } },
+          ])
+          .toArray();
+
+        // 4. User Growth (Last 7 Days)
+        const userGrowth = await userCollection
+          .aggregate([
+            {
+              $match: {
+                createdAt: {
+                  $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+                },
+              },
+            },
+            {
+              $group: {
+                _id: {
+                  $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+                },
+                count: { $sum: 1 },
+              },
+            },
+            { $sort: { _id: 1 } },
+            { $project: { date: "$_id", count: 1, _id: 0 } },
+          ])
+          .toArray();
+
+        res.send({
+          totalUsers,
+          totalPublicLessons,
+          reportedLessons,
+          todayLessons,
+          topContributors,
+          lessonGrowth,
+          userGrowth,
+        });
+      } catch (error) {
+        res.status(500).send({ message: "Failed to load admin stats" });
+      }
     });
 
     // ==========================================
@@ -272,16 +350,34 @@ async function run() {
 
     // Get All Public Lessons
     app.get("/lessons", async (req, res) => {
-      try {
-        const query = { visibility: "public" };
-        const lessons = await lessonsCollection
-          .find(query)
-          .sort({ createdAt: -1 })
-          .toArray();
-        res.send(lessons);
-      } catch (err) {
-        res.status(500).send({ message: "Error fetching lessons" });
-      }
+      const { search, category, tone, sort, page = 1, limit = 6 } = req.query;
+
+      // Convert strings to numbers
+      const pageNum = parseInt(page);
+      const limitNum = parseInt(limit);
+      const skip = (pageNum - 1) * limitNum;
+
+      // 1. Build Filter Query (same as before)
+      let query = { visibility: "public" };
+      if (search) query.title = { $regex: search, $options: "i" };
+      if (category) query.category = category;
+      if (tone) query.emotionalTone = tone;
+
+      // 2. Build Sort (same as before)
+      let sortOptions =
+        sort === "mostSaved" ? { favoritesCount: -1 } : { createdAt: -1 };
+
+      // 3. Get Data + Total Count
+      const lessons = await lessonsCollection
+        .find(query)
+        .sort(sortOptions)
+        .skip(skip)
+        .limit(limitNum)
+        .toArray();
+
+      const totalCount = await lessonsCollection.countDocuments(query);
+
+      res.send({ lessons, totalCount });
     });
 
     // Get Single Lesson
@@ -670,43 +766,68 @@ async function run() {
       }
     );
     app.get("/admin/profile", verifyFBToken, verifyAdmin, async (req, res) => {
-      const email = req.decoded_email;
+      try {
+        const email = req.decoded_email;
 
-      const admin = await userCollection.findOne(
-        { email },
-        {
-          projection: {
-            displayName: 1,
-            email: 1,
-            photoURL: 1,
-            role: 1,
-            stats: 1, // optional activity stats
-          },
+        const admin = await userCollection.findOne(
+          { email },
+          {
+            projection: {
+              displayName: 1,
+              email: 1,
+              photoURL: 1,
+              role: 1,
+              stats: 1,
+            },
+          }
+        );
+
+        if (!admin) {
+          return res.status(404).send({
+            message: "Admin profile not found",
+          });
         }
-      );
 
-      res.send(admin);
+        res.send({
+          displayName: admin.displayName || "",
+          email: admin.email,
+          photoURL: admin.photoURL || "",
+          role: admin.role,
+          stats: admin.stats || {},
+        });
+      } catch (error) {
+        console.error("Admin profile error:", error);
+        res.status(500).send({
+          message: "Failed to load admin profile",
+        });
+      }
     });
+
     app.patch(
       "/admin/profile",
       verifyFBToken,
       verifyAdmin,
       async (req, res) => {
-        const email = req.decoded_email;
-        const { displayName, photoURL } = req.body;
+        try {
+          const { displayName, photoURL } = req.body;
+          const email = req.decoded_email;
 
-        await userCollection.updateOne(
-          { email },
-          {
-            $set: {
-              displayName,
-              photoURL,
-              updatedAt: new Date(),
-            },
-          }
-        );
+          // 🔹 Update MongoDB
+          const result = await userCollection.updateOne(
+            { email },
+            {
+              $set: {
+                displayName,
+                photoURL,
+                updatedAt: new Date(),
+              },
+            }
+          );
 
-        res.send({ success: true });
+          res.send({ success: true, result });
+        } catch (error) {
+          res.status(500).send({ message: "Profile update failed" });
+        }
       }
     );
 
@@ -739,16 +860,33 @@ async function run() {
       res.send(lessons);
     });
     app.patch("/users/profile", verifyFBToken, async (req, res) => {
-      const email = req.decoded_email;
-      const { name, photo } = req.body;
+      try {
+        const { displayName, photoURL } = req.body;
+        const email = req.decoded_email;
 
-      await userCollection.updateOne(
-        { email },
-        { $set: { name, photo } },
-        { upsert: true }
-      );
+        if (!displayName || !photoURL) {
+          return res
+            .status(400)
+            .send({ message: "Name and Photo are required" });
+        }
 
-      res.send({ success: true });
+        const result = await userCollection.updateOne(
+          { email },
+          {
+            $set: {
+              displayName,
+              photoURL,
+              updatedAt: new Date(),
+            },
+          },
+          { upsert: true } // Creates the profile if it doesn't exist
+        );
+
+        res.send({ success: true, updated: result.modifiedCount > 0 });
+      } catch (error) {
+        console.error("Update error:", error);
+        res.status(500).send({ message: "Internal server error" });
+      }
     });
     app.get("/lessons/featured", async (req, res) => {
       try {
