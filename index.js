@@ -163,7 +163,7 @@ async function run() {
     app.get("/users/:email/lessons", async (req, res) => {
       try {
         const email = req.params.email;
-        const query = { authorEmail: email };
+        const query = { authorEmail: email, visibility: "public" };
 
         // Sort by newest first
         const result = await lessonsCollection
@@ -444,16 +444,32 @@ async function run() {
     });
     // GET /lessons/related
     // Query Params: ?category=...&tone=...&id=...
-    app.get("/lessons/related", verifyFBToken, async (req, res) => {
+  
+
+    app.get("/lessons/related", async (req, res) => {
       try {
         const { category, tone, id } = req.query;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: "Invalid lesson ID" });
+        }
+
+        const orConditions = [];
+
+        if (category) orConditions.push({ category });
+        if (tone) orConditions.push({ emotionalTone: tone });
+
         const query = {
           _id: { $ne: new ObjectId(id) },
-          $or: [{ category: category }, { emotionalTone: tone }],
+          visibility: "public",
+          ...(orConditions.length > 0 && { $or: orConditions }),
         };
 
-        // Fetch 6 random matches (or sort by date)
-        const related = await lessonsCollection.find(query).limit(6).toArray();
+        const related = await lessonsCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .limit(6)
+          .toArray();
 
         res.send(related);
       } catch (error) {
@@ -461,6 +477,7 @@ async function run() {
         res.status(500).send({ message: "Failed to fetch related lessons" });
       }
     });
+
     // recent lessons
     app.get("/lessons/recent", verifyFBToken, async (req, res) => {
       try {
@@ -846,17 +863,25 @@ async function run() {
     );
 
     // profile
-    app.get("/lessons/user/:email", async (req, res) => {
-      const email = req.params.email;
+    // app.get("/lessons/user/:email", async (req, res) => {
+    //   const email = req.params.email;
 
+    //   const lessons = await lessonsCollection
+    //     .find({
+    //       authorEmail: email,
+    //       visibility: "public",
+    //     })
+    //     .sort({ createdAt: -1 })
+    //     .toArray();
+
+    //   res.send(lessons);
+    // });
+    app.get("/user/profile", verifyFBToken, async (req, res) => {
+      const email = req.decoded_email;
       const lessons = await lessonsCollection
-        .find({
-          authorEmail: email,
-          visibility: "public",
-        })
+        .find({ authorEmail: email })
         .sort({ createdAt: -1 })
         .toArray();
-
       res.send(lessons);
     });
     app.patch("/users/profile", verifyFBToken, async (req, res) => {
